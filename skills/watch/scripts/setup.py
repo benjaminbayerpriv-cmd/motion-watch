@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Base preflight, backend configuration, and an opt-in managed WhisperX install."""
+"""Base preflight, backend configuration, and opt-in managed WhisperX and motion-analysis installs."""
 from __future__ import annotations
 
 import argparse
@@ -15,6 +15,7 @@ from pathlib import Path
 from config import (CONFIG_DIR, CONFIG_FILE, ConfigError, DETAILS, ENGINES, get_config,
                     load_api_key, load_gemini_key, read_env_file, resolve_engine, write_settings)
 from runtime import configure_stdio, diagnostic, run_text
+import motion
 
 REQUIRED_BINARIES = ['ffmpeg', 'ffprobe', 'yt-dlp']
 WHISPERX_VERSION = '3.8.6'
@@ -163,7 +164,7 @@ def _status(detailed=False):
               'first_run': is_first_run(), 'setup_complete': not is_first_run(),
               'missing_binaries': missing, 'whisper_backend': backend, 'configured_backend': chosen,
               'has_api_key': has_key, 'backend_ready': backend_ready,
-              'whisperx_ready': local_ready, 'whisperx_bin': cfg['whisperx_bin'],
+              'motion_ready': motion.is_ready(), 'tracker_ready': motion.tracker_ready(), 'track_model_ready': motion.MODEL_PATH.is_file(), 'whisperx_ready': local_ready, 'whisperx_bin': cfg['whisperx_bin'],
               'whisperx_model': cfg['whisperx_model'], 'config_file': str(CONFIG_FILE),
               'watch_detail': cfg['detail'], 'platform': platform.system()}
     if detailed:
@@ -312,12 +313,96 @@ def install_whisperx():
     return 0
 
 
+def _fetch_track_model():
+    """The 0.7 MB OpenCV-zoo ViT tracker, pinned by SHA-256; the object tools fall back to template matching without it."""
+    import hashlib
+    from urllib.request import urlopen
+    target = motion.MODEL_PATH
+    if target.is_file() and hashlib.sha256(target.read_bytes()).hexdigest() == motion.MODEL_SHA256:
+        return True
+    print(f'[setup] Downloading the ViT object-tracking model (0.7 MB) from {motion.MODEL_URL}', file=sys.stderr, flush=True)
+    try:
+        with urlopen(motion.MODEL_URL, timeout=60) as response:
+            data = response.read(8_000_000)
+    except OSError as exc:
+        print(f'[setup] Model download failed ({type(exc).__name__}); object tracking will use template matching. Rerun --install-motion to retry.', file=sys.stderr)
+        return False
+    if hashlib.sha256(data).hexdigest() != motion.MODEL_SHA256:
+        print('[setup] Downloaded model failed its checksum and was discarded.', file=sys.stderr)
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+    return True
+
+
+def install_motion():
+    """Managed venv (numpy, OpenCV, SciPy) for `watch --motion`, plus the small ViT tracker for `track.py`."""
+    print('[setup] Motion analysis: installs numpy, opencv-python-headless and scipy (about 150 MB) into '
+          f'{motion.MOTION_VENV} and fetches a 0.7 MB object-tracking model.', file=sys.stderr, flush=True)
+    if not (_which('ffmpeg') and _which('ffprobe')):
+        raise SystemExit('Install FFmpeg first (it provides ffprobe too), then rerun setup.py --install-motion.')
+    uv = _ensure_uv()
+    venv, python = motion.MOTION_VENV, motion.python_path()
+    if not motion.is_ready():
+        if venv.is_symlink():
+            raise SystemExit('Managed motion venv is a symlink; choose a regular managed directory before installing.')
+        if venv.exists():
+            shutil.rmtree(venv)  # Only this fixed, installer-owned environment.
+        venv.parent.mkdir(parents=True, exist_ok=True)
+        _install_step([uv, 'venv', str(venv), '--python', '3.12'], 'Create motion Python 3.12 environment')
+        _install_step([uv, 'pip', 'install', '--python', python, *motion.PACKAGES], 'Install motion dependencies')
+    check = run_text([str(python), '-I', '-c', 'import cv2, numpy, scipy.signal; '
+                      'print(cv2.__version__, numpy.__version__, scipy.__version__)'], timeout=120)
+    if check.returncode:
+        motion.SENTINEL.unlink(missing_ok=True)
+        raise SystemExit(f'Motion environment failed its import check: {diagnostic(check.stderr)}')
+    motion.SENTINEL.write_text(check.stdout.strip() + '\n', encoding='utf-8')
+    model_ok = _fetch_track_model()
+    print(f'[setup] Motion analysis is ready ({check.stdout.strip()}); neural tracker {"ready" if model_ok else "missing (template matching fallback)"}.', file=sys.stderr)
+    return 0
+
+
+def install_tracker():
+    """Managed PyTorch venv plus Meta's CoTracker3 (pinned commit, SHA-256-checked weights) for point tracking."""
+    print('[setup] Point tracker: installs PyTorch and friends (about 800 MB) into '
+          f'{motion.TRACKER_VENV}, fetches Meta\'s CoTracker3 code at a pinned commit from GitHub '
+          f'({motion.COTRACKER_REF}) and its 100 MB weights from Hugging Face. CoTracker3 is licensed CC BY-NC 4.0 (non-commercial use).',
+          file=sys.stderr, flush=True)
+    if not _which('ffmpeg'):
+        raise SystemExit('Install FFmpeg first, then rerun setup.py --install-tracker.')
+    uv = _ensure_uv()
+    venv, python = motion.TRACKER_VENV, motion.tracker_python()
+    if not motion.tracker_ready():
+        if venv.is_symlink():
+            raise SystemExit('Managed tracker venv is a symlink; choose a regular managed directory before installing.')
+        if venv.exists():
+            shutil.rmtree(venv)  # Only this fixed, installer-owned environment.
+        venv.parent.mkdir(parents=True, exist_ok=True)
+        _install_step([uv, 'venv', str(venv), '--python', '3.12'], 'Create tracker Python 3.12 environment')
+        _install_step([uv, 'pip', 'install', '--python', python, *motion.TRACKER_PACKAGES], 'Install PyTorch and tracker dependencies')
+    motion.TRACKER_SENTINEL.unlink(missing_ok=True)
+    code = ('import hashlib, os, sys, torch\n'
+            f'm = torch.hub.load({motion.COTRACKER_REF!r}, "cotracker3_online", trust_repo=True)\n'
+            'p = os.path.join(torch.hub.get_dir(), "checkpoints", "scaled_online.pth")\n'
+            'print(hashlib.sha256(open(p, "rb").read()).hexdigest())\n')
+    check = run_text([str(python), '-I', '-c', code], timeout=1800)
+    digest = (check.stdout.strip().splitlines() or [''])[-1]
+    if check.returncode or digest != motion.COTRACKER_WEIGHTS_SHA256:
+        raise SystemExit('CoTracker3 did not load or its weights failed the checksum '
+                         f'(got {digest[:16] or "nothing"}…): {diagnostic(check.stderr)}')
+    motion.TRACKER_SENTINEL.write_text(motion.COTRACKER_REF + '\n', encoding='utf-8')
+    print('[setup] CoTracker3 point tracker is ready (weights verified).', file=sys.stderr)
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--check', action='store_true')
     mode.add_argument('--json', action='store_true')
     mode.add_argument('--install-whisperx', action='store_true')
+    mode.add_argument('--install-motion', action='store_true')
+    mode.add_argument('--install-tracker', action='store_true')
     parser.add_argument('--backend', choices=['auto', 'whisperx', 'groq', 'openai', 'none'])
     parser.add_argument('--detail', choices=sorted(DETAILS))
     parser.add_argument('--engine', choices=sorted(ENGINES))
@@ -327,6 +412,10 @@ def main():
             return cmd_check()
         if args.json:
             return cmd_json()
+        if args.install_motion:
+            return install_motion()
+        if args.install_tracker:
+            return install_tracker()
         return cmd_install('whisperx' if args.install_whisperx else args.backend, args.detail, args.engine)
     except (ConfigError, OSError, ValueError) as exc:
         print(f'[setup] {exc}', file=sys.stderr)

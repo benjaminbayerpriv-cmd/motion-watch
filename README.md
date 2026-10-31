@@ -2,6 +2,10 @@
 
 Give an agent video evidence: a URL or local file becomes timestamped frames and a transcript. Install it in Claude Code (the desktop app, VS Code, or a terminal), or use it with Codex and other [Agent Skills](https://agentskills.io) hosts. Native captions come first; optional local WhisperX or Groq/OpenAI transcription handles videos without captions.
 
+> **This is a fork of [`bradautomates/claude-video`](https://github.com/bradautomates/claude-video) (MIT, © Bradley Bonanno)** with a motion and object-tracking layer on top: `--motion`, `track.py`, point and box tracking, shape-change measurements. The install commands further down install the *upstream* skill; to install this fork run `./install-local.sh` (add `--with-tracker` for the CoTracker3 point tracker).
+>
+> **Licences of what was added.** The code of this fork follows the upstream MIT licence. The optional point tracker downloads **CoTracker3** (Meta, CC BY-NC 4.0, non-commercial use only) at run time; it is not part of this repository. The box tracker uses the ViT tracking model from OpenCV Zoo (Apache-2.0), also downloaded at install time.
+
 ## Choose your app
 
 **Using Claude? Run Watch in Claude Code.** Install it through Claude Desktop and use a **Code** session, or add it with the plugin commands in VS Code or a terminal. Watch does **not** work in Claude Chat or Cowork; [see why](#chat-cowork-and-browser-apps).
@@ -244,6 +248,51 @@ The installer writes the absolute `WATCH_WHISPERX_BIN` path. The venv is `~/.cac
 For non-English audio, set the spoken-language hint (`WATCH_WHISPERX_LANGUAGE=es`, for example) or try `WATCH_WHISPERX_MODEL=large-v3` and rerun the installer. Large-v3 downloads about 2.9 GB and used about 6 GB peak process RAM in the reference measurement. Small can misidentify non-English speech without a hint. A caption translation request (`--sub-lang`) is never used as the spoken-language hint. WhisperX 3.8.6's JSON language is unreliable with alignment disabled, so auto-detection is reported as **unverified**.
 
 Local inference has no default timeout; `WATCH_WHISPERX_TIMEOUT` accepts positive seconds. Failure or cancellation never switches to cloud transcription. CUDA is configurable but untested; MPS support is not promised. TorchCodec import warnings on newer FFmpeg are suppressed for this CLI-decoding path; do not downgrade FFmpeg just for that warning.
+
+## Motion mode: how a video moves
+
+Frames show what is in a video, not how it moves. `--motion` measures the movement and renders a few images that make it visible, so an agent can explain pacing, camera work, animation timing and beat sync without reading dozens of stills.
+
+```text
+/watch short.mp4 --motion
+/watch https://youtu.be/... --motion --start 0:00 --end 0:20 --max-shots 3
+```
+
+One-time setup (about 150 MB, no models, no network afterwards):
+
+```bash
+python3 skills/watch/scripts/setup.py --install-motion
+```
+
+| You get | How |
+|---|---|
+| Cuts, shot lengths, pacing trend, hook (first 3 s) | frame-pair difference and histogram checks |
+| Camera per shot: static, pan, tilt, zoom/push, roll, handheld/shake | RANSAC similarity fit on tracked features |
+| Motion rhythm and peaks | camera-compensated dense optical flow; a local measure (fastest 1.5 % of pixels) so a small ball is not averaged away |
+| Object paths, speed profile, easing (ease-in/out, smoothstep, overshoot) | feature-point tracking plus moving-region tracking, fitted to standard curves |
+| Beat sync of cuts and motion peaks | audio onsets and a shuffle test against chance |
+
+Images: `overview.png` (thumbnails plus all curves on one time axis), and per shot a camera-stabilised **motion history** (colour = time), a **strobe** (the subject stamped at seven moments) and **tracks** (paths with a dot every 0.1 s; bunching dots mean easing). Everything runs locally, in a managed venv, so the base skill stays standard-library only.
+
+Limits: only hard cuts are detected; strongly moving cameras get no overlay images; easing fits are approximations; one video cannot prove why it went viral, but the numbers make several videos comparable.
+
+### Follow one object: `track.py`
+
+`--motion` looks at the whole video. For a single object (a bouncing ball, a character crossing the frame, two things approaching each other) use the object tools. The agent decides what to follow: it reads the coordinates off a grid, verifies its click, and exactly that spot is tracked. Nothing is detected automatically:
+
+```bash
+python3 skills/watch/scripts/track.py pick  video.mp4 --t 2.4                       # frame with a coordinate grid; nothing is detected for you
+python3 skills/watch/scripts/track.py pick  video.mp4 --t 2.4 --at 0.217,0.22       # check a click: cross plus magnified patch
+python3 skills/watch/scripts/track.py track video.mp4 --obj ball@2.4=0.217,0.22 --size 0.12   # follow that spot, forward and backward
+python3 skills/watch/scripts/track.py sheet video.mp4 --start 2.4 --end 3 --n 8 --box 0.38,0.05,0.24,0.2 --grid
+python3 skills/watch/scripts/track.py flow  video.mp4 --t 2.4
+```
+
+For parts that change shape (a mouth opening, a fin swinging) track several points and add `--distance upper,lower` or `--angle a,pivot,c`: you get the curve, the number of cycles and their timing instead of a contact sheet to squint at.
+
+Made for you to watch, not only for the model: `summary.png` (everything in one picture) and `tracked.mp4` (box, trail, speed, BOUNCE 72 % flashes); `--motion` adds `motion_view.mp4` (cuts, camera arrow, moving regions, activity gauge). The skill tells the agent to send these to you.
+
+Two tracking engines: **CoTracker3** (`--engine point`, Meta's point-tracking model; follows the exact clicked pixel through motion, deformation and short occlusions; installed with `setup.py --install-tracker`, about 800 MB, non-commercial licence CC BY-NC 4.0) and a small **ViT box tracker** (0.7 MB, installed with `--install-motion`; best for flat objects and size analysis). Both come with camera-motion compensation. You get the path as a table, an ASCII map and a CSV; events such as bounces (with the speed kept after each), turns, gravity-like arcs, periodic motion, easing and squash and stretch; the path drawn on the frame with time colours, a filmstrip of the object over time, plots, and a `tracked.mp4` with box and trail drawn on, for you to watch. Checked on synthetic clips with known physics: bounce times within one frame, bounce ratio 72–73 % for a true 72 %, gravity 2.49 for a true 2.5 frame widths/s², a 0.5 Hz oscillation recovered at 0.50 Hz, identical results with a panning camera.
 
 ## Detail and focus
 

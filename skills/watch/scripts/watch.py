@@ -19,6 +19,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from config import ConfigError, frame_cap, get_config, load_gemini_key, resolve_engine  # noqa: E402
 import gemini  # noqa: E402
+import motion  # noqa: E402
 from download import download, fetch_captions, is_url, auth_args  # noqa: E402
 from frames import MAX_FPS, auto_fps, auto_fps_focus, extract_at_timestamps, extract_keyframes, extract_scene_or_uniform, format_time, get_metadata, merge_frames, parse_time, parse_timestamps, validate_controls  # noqa: E402
 from transcribe import filter_range, format_transcript, parse_vtt  # noqa: E402
@@ -139,6 +140,14 @@ def main() -> int:
     cookies = ap.add_mutually_exclusive_group()
     cookies.add_argument("--cookies", default=None, help="Explicit cookie file (yt-dlp may update this jar)")
     cookies.add_argument("--cookies-from-browser", default=None, help="Explicit yt-dlp browser selector")
+    ap.add_argument("--motion", action="store_true",
+                    help="Measure movement instead of sampling stills: camera moves, cuts, optical flow, object "
+                         "paths with easing, audio sync, plus a few images (overview, motion history, strobe, "
+                         "tracks). Always runs locally; defaults to --detail transcript so no stills are added.")
+    ap.add_argument("--no-view", action="store_true", help="With --motion: skip the annotated motion_view.mp4 made for human viewers.")
+    ap.add_argument("--max-shots", type=int, default=2,
+                    help="With --motion: how many shots get the detailed images (default 2; the first shot "
+                         "plus the most active ones).")
     ap.add_argument("--engine", choices=["auto", "gemini", "local"], default=None,
                     help="gemini: Google watches the video and answers (needs GEMINI_API_KEY). "
                          "local: frames + transcript on this machine. Default auto: gemini when a key exists.")
@@ -149,7 +158,9 @@ def main() -> int:
         ap.error("--no-whisper conflicts with --whisper")
 
     config = get_config(backend_override="none" if args.no_whisper else args.whisper)
-    detail = args.detail or config["detail"]
+    detail = args.detail or ("transcript" if args.motion else config["detail"])
+    if args.max_shots < 0:
+        ap.error("--max-shots must be zero or positive")
     max_frames = args.max_frames if args.max_frames is not None else frame_cap(detail)
     budget_cap = max_frames if max_frames is not None else 100
     start_sec, end_sec = parse_time(args.start), parse_time(args.end)
@@ -162,7 +173,9 @@ def main() -> int:
     auth = {"cookies_file": cookies_file, "cookies_from_browser": cookies_browser}
 
     gemini_key = load_gemini_key()
-    if resolve_engine(args.engine or config["engine"], bool(gemini_key)) == "gemini":
+    if args.motion and args.engine == "gemini":
+        ap.error("--motion measures the video locally and cannot be combined with --engine gemini")
+    if not args.motion and resolve_engine(args.engine or config["engine"], bool(gemini_key)) == "gemini":
         return run_gemini(args, config, gemini_key, start_sec, end_sec, auth)
 
     parent = Path(args.out_dir).expanduser().resolve() if args.out_dir else None
@@ -194,7 +207,7 @@ def main() -> int:
             except (OSError, ValueError) as exc:
                 errors.append(f"Caption parsing failed: {exc}")
 
-    audio_only = detail == "transcript" and not cue_timestamps
+    audio_only = detail == "transcript" and not cue_timestamps and not args.motion
     # Captions are assessed before range filtering: a quiet interval is not a missing track.
     need_media = not (audio_only and (track_available or backend_choice == "none") and url_source)
     if need_media:
@@ -262,6 +275,20 @@ def main() -> int:
         visual_error = "No video stream; visual evidence is unavailable."
     if cue_frames:
         frames = merge_frames(frames, cue_frames)
+
+    motion_report = None
+    if args.motion:
+        if not video_path:
+            errors.append(f"Motion analysis skipped: {visual_error or 'no video file available'}")
+        elif not meta.get("has_video", bool(meta.get("width"))):
+            errors.append("Motion analysis skipped: no video stream.")
+        else:
+            try:
+                print("[watch] measuring motion…", file=sys.stderr)
+                motion_report = motion.run(video_path, work / "motion", start=start_sec, end=end_sec,
+                                           max_shots=args.max_shots, audio=bool(meta.get("has_audio")), view=not args.no_view)
+            except SystemExit as exc:
+                errors.append(f"Motion analysis unavailable: {exc}")
 
     transcript_state = "missing"
     if not track_available and backend_choice != "none" and video_path and meta.get("has_audio"):
@@ -373,6 +400,17 @@ def main() -> int:
             "`--detail token-burner` to keep every scene-change frame across the whole video."
         )
 
+    if motion_report:
+        print()
+        print("## Motion analysis")
+        print()
+        print("**Start with `overview.png`, then read only the further images the numbers make interesting. "
+              "The text below is the measured evidence; the images show it. To follow one object closely "
+              "(path, bounces, easing), use `track.py pick/track` with the ready-made `--obj` lines below; see SKILL.md.**")
+        print()
+        body = motion_report.split("\n", 2)[2] if motion_report.startswith("# ") else motion_report
+        print(body.replace("\n## ", "\n### ").lstrip())
+
     print()
     print("## Frames")
     print()
@@ -419,7 +457,7 @@ def main() -> int:
     print("---")
     print(f"_Work dir: `{work}` — delete when done._")
 
-    return 1 if errors and not frames and not transcript_segments and not track_available else 0
+    return 1 if errors and not frames and not transcript_segments and not track_available and not motion_report else 0
 
 
 if __name__ == "__main__":

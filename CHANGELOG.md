@@ -2,6 +2,54 @@
 
 All notable changes to `/watch` are documented here.
 
+## [0.8.0] — 2026-10-31
+
+### Added
+- **Shape-change measurements.** `track --distance a,b` follows the distance between two tracked points over time (a mouth opening, a gap), `--angle a,b,c` the angle at the middle of three (a fin, a limb, a hinge). The report gives min/max/mean, the maxima and minima with their times, the number of cycles, the period and frequency, a curve, and the values over time; `plot.png` and `summary.png` get a curve per measurement, and `tracked.mp4` draws the line between the points with the live value. Checked on a synthetic mouth (period 1.00 s for a true 1.0 s, maxima within 0.03 s) and hinge (19–82° for a true 20–80°, period 2.03 s for 2.0 s).
+- `SKILL.md` "Which tool for which question": looking at frames is not an analysis; measure with `track` and use `sheet` only to find the moment and the coordinates. `sheet` images and reports now say "look only".
+
+### Fixed
+- A failure while rendering the human outputs (summary picture, annotated video) no longer aborts the whole track report.
+
+## [0.7.0] — 2026-10-31
+
+### Added
+- **CoTracker3 point tracking.** `track --obj NAME@T=x,y` now follows exactly the clicked pixel with Meta's CoTracker3 (online) point-tracking model, forward and backward in time, with per-frame visibility, camera-motion removal (scene coordinates) and loss at scene cuts. `--engine auto|point|box` selects it; the box engine (ViT) stays for `x,y,w,h` seeds, flat uniformly coloured objects and size/squash-and-stretch analysis. Checked on a synthetic bouncing ball: bounce times within one frame, bounce ratio 72–74 % for a true 72 %, gravity 2.49 for a true 2.5, identical with a panning camera.
+- `setup.py --install-tracker` creates a managed PyTorch venv, loads CoTracker3 at a pinned commit and verifies the weights' SHA-256. `setup.py --json` reports `tracker_ready`. Without it `auto` falls back to the box engine and says so.
+- CoTracker3 is licensed CC BY-NC 4.0 (non-commercial); the report names it.
+
+## [0.6.0] — 2026-10-31
+
+### Changed
+- **The agent chooses the object, the tool detects nothing.** `pick` no longer proposes numbered candidates; it renders a frame with a coordinate grid. `pick --at x,y` draws a cross and a magnified patch so a click can be verified, `--box` zooms. `track --obj NAME@T=x,y --size S` follows exactly the clicked spot (a box of width S frame widths centred on it); `x,y,w,h` gives an explicit box. Region growing, default boxes and `#N` candidates were removed.
+
+## [0.5.1] — 2026-10-31
+
+### Added
+- **Outputs made for humans.** `--motion` writes `motion_view.mp4`: the video with cuts (red frame), a camera arrow, moving regions, tracked movers (A, B, …) with trails and a scrolling activity gauge (cuts, audio beats). `track.py track` writes `summary.png` (key facts, path, filmstrips, curves in one picture) and a richer `tracked.mp4` (BOUNCE 72 % / TURN / PAUSE flashes, speed gauge with cursor). They are marked FOR THE HUMAN in the file list. `--no-view` skips the motion video.
+- `SKILL.md` section "Show your work to the user": say which tool is running, deliver the human outputs, then answer with the measured numbers.
+- `sheet` images carry a "WATCH SHEET" banner so they are not mistaken for plain frame sampling.
+
+### Fixed
+- Text in rendered images was ghosted (an outline of different advance under the text) and broke on "°"; labels are now ASCII-safe with a same-stroke outline.
+
+## [0.5.0] — 2026-10-31
+
+### Added
+- **Object tools (`track.py`).** `pick` renders a frame with a labelled 0..1 coordinate grid and numbered object candidates (moving regions and distinct colour regions); `track` follows one or several chosen objects forward and backward with a small neural ViT tracker (OpenCV `TrackerVit`, 0.7 MB model, checksum-pinned) plus camera-motion estimation, automatic working resolution for tiny objects, confidence per frame and re-finding by appearance after occlusion or a scene cut.
+- Path analysis as text and images: position/size/speed table, ASCII path map, CSV, pauses, floor/ceiling/wall bounces with the speed kept (from fitted parabolas), turns, free-flight gravity, periodic motion (frequency, amplitude), easing of the main move, size and squash-and-stretch, and relations between objects (distance, closest approach, contact). Camera motion is removed so paths are in scene coordinates when the camera moves.
+- Images: `paths.png` (time-coloured trail, dots at fixed time steps, event rings, canvas that grows beyond the frame), `filmstrip_*.png` (object crops over time), `plot.png`, `seed_*.png`; `tracked.mp4` with box, trail and speed drawn on the video for the human viewer.
+- `sheet` (slow-motion contact sheet, optional zoom box and frame-coordinate grid) and `flow` (motion arrows and flow colours with a per-region heading and speed list).
+- The `--motion` report prints a ready-to-run `track.py --obj` line for every tracked mover. `setup.py --install-motion` also fetches the tracking model; `setup.py --json` reports `track_model_ready`.
+
+## [0.4.0] — 2026-10-31
+
+### Added
+- **Motion mode (`--motion`).** Measures how a video moves instead of sampling stills. One local pass computes cuts and shot lengths, camera behaviour per shot (pan, tilt, zoom, roll, shake) from RANSAC on tracked features, camera-compensated dense optical flow, a local-motion measure that catches small fast objects, and audio onsets, tempo and loudness. Moving objects are tracked with feature points and with a moving-region tracker, clustered, and described with start/end, direction, peak speed, a speed profile and a fitted easing curve (linear, ease-in/out, smoothstep, overshoot/spring). A shuffle test says whether cuts and motion peaks land on the beat more often than chance.
+- Images that replace dozens of stills: `overview.png` (thumbnails plus motion, camera and audio curves on one time axis), per-shot camera-stabilised motion history (colour = time), strobe (chronophotography) and track paths with 0.1 s dots. Panning shots use their best low-drift window; overlays are skipped, and the report says so, when the camera moves too much.
+- `setup.py --install-motion` creates a managed `~/.cache/watch/motion-venv` (numpy, OpenCV, SciPy; no models). `setup.py --json` reports `motion_ready`. `WATCH_MOTION_VENV` relocates it. The base skill stays standard-library only.
+- `--max-shots N` sets how many shots get detail images.
+
 ## [0.3.2] — 2026-09-25
 
 ### Changed
